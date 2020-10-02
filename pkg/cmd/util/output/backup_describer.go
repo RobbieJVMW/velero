@@ -1,5 +1,5 @@
 /*
-Copyright 2017, 2019 the Velero contributors.
+Copyright 2020 the Velero contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -218,13 +218,22 @@ func DescribeBackupSpec(d *Describer, spec velerov1api.BackupSpec) {
 		}
 	}
 
+	if spec.OrderedResources != nil {
+		d.Println()
+		d.Printf("OrderedResources:\n")
+		for key, value := range spec.OrderedResources {
+			d.Printf("\t%s: %s\n", key, value)
+		}
+	}
+
 }
 
 // DescribeBackupStatus describes a backup status in human-readable format.
 func DescribeBackupStatus(d *Describer, backup *velerov1api.Backup, details bool, veleroClient clientset.Interface, insecureSkipTLSVerify bool, caCertPath string) {
 	status := backup.Status
 
-	d.Printf("Backup Format Version:\t%d\n", status.Version)
+	// Status.Version has been deprecated, use Status.FormatVersion
+	d.Printf("Backup Format Version:\t%s\n", status.FormatVersion)
 
 	d.Println()
 	// "<n/a>" output should only be applicable for backups that failed validation

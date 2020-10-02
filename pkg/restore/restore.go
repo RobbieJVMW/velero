@@ -1,5 +1,5 @@
 /*
-Copyright 2017, 2019, 2020 the Velero contributors.
+Copyright 2020 the Velero contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -43,7 +42,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/cache"
 
+	"github.com/vmware-tanzu/velero/internal/hook"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/archive"
 	"github.com/vmware-tanzu/velero/pkg/client"
@@ -52,6 +53,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
+	"github.com/vmware-tanzu/velero/pkg/podexec"
 	"github.com/vmware-tanzu/velero/pkg/restic"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
@@ -96,6 +98,8 @@ type kubernetesRestorer struct {
 	fileSystem                 filesystem.Interface
 	pvRenamer                  func(string) (string, error)
 	logger                     logrus.FieldLogger
+	podCommandExecutor         podexec.PodCommandExecutor
+	podGetter                  cache.Getter
 }
 
 // NewKubernetesRestorer creates a new kubernetesRestorer.
@@ -108,6 +112,8 @@ func NewKubernetesRestorer(
 	resticTimeout time.Duration,
 	resourceTerminatingTimeout time.Duration,
 	logger logrus.FieldLogger,
+	podCommandExecutor podexec.PodCommandExecutor,
+	podGetter cache.Getter,
 ) (Restorer, error) {
 	return &kubernetesRestorer{
 		discoveryHelper:            discoveryHelper,
@@ -126,7 +132,9 @@ func NewKubernetesRestorer(
 			veleroCloneName := "velero-clone-" + veleroCloneUuid.String()
 			return veleroCloneName, nil
 		},
-		fileSystem: filesystem.NewFileSystem(),
+		fileSystem:         filesystem.NewFileSystem(),
+		podCommandExecutor: podCommandExecutor,
+		podGetter:          podGetter,
 	}, nil
 }
 
@@ -154,7 +162,7 @@ func (kr *kubernetesRestorer) Restore(
 	}
 
 	// get resource includes-excludes
-	resourceIncludesExcludes := getResourceIncludesExcludes(kr.discoveryHelper, req.Restore.Spec.IncludedResources, req.Restore.Spec.ExcludedResources)
+	resourceIncludesExcludes := collections.GetResourceIncludesExcludes(kr.discoveryHelper, req.Restore.Spec.IncludedResources, req.Restore.Spec.ExcludedResources)
 
 	// get namespace includes-excludes
 	namespaceIncludesExcludes := collections.NewIncludesExcludes().
@@ -185,6 +193,18 @@ func (kr *kubernetesRestorer) Restore(
 		if err != nil {
 			return Result{}, Result{Velero: []string{err.Error()}}
 		}
+	}
+
+	resourceRestoreHooks, err := hook.GetRestoreHooksFromSpec(&req.Restore.Spec.Hooks)
+	if err != nil {
+		return Result{}, Result{Velero: []string{err.Error()}}
+	}
+	hooksCtx, hooksCancelFunc := go_context.WithCancel(go_context.Background())
+	waitExecHookHandler := &hook.DefaultWaitExecHookHandler{
+		PodCommandExecutor: kr.podCommandExecutor,
+		ListWatchFactory: &hook.DefaultListWatchFactory{
+			PodsGetter: kr.podGetter,
+		},
 	}
 
 	pvRestorer := &pvRestorer{
@@ -223,30 +243,14 @@ func (kr *kubernetesRestorer) Restore(
 		pvRenamer:                  kr.pvRenamer,
 		discoveryHelper:            kr.discoveryHelper,
 		resourcePriorities:         kr.resourcePriorities,
+		resourceRestoreHooks:       resourceRestoreHooks,
+		hooksErrs:                  make(chan error),
+		waitExecHookHandler:        waitExecHookHandler,
+		hooksContext:               hooksCtx,
+		hooksCancelFunc:            hooksCancelFunc,
 	}
 
 	return restoreCtx.execute()
-}
-
-// getResourceIncludesExcludes takes the lists of resources to include and exclude, uses the
-// discovery helper to resolve them to fully-qualified group-resource names, and returns an
-// IncludesExcludes list.
-func getResourceIncludesExcludes(helper discovery.Helper, includes, excludes []string) *collections.IncludesExcludes {
-	resources := collections.GenerateIncludesExcludes(
-		includes,
-		excludes,
-		func(item string) string {
-			gvr, _, err := helper.ResourceFor(schema.ParseGroupResource(item).WithVersion(""))
-			if err != nil {
-				return ""
-			}
-
-			gr := gvr.GroupResource()
-			return gr.String()
-		},
-	)
-
-	return resources
 }
 
 type resolvedAction struct {
@@ -266,7 +270,7 @@ func resolveActions(actions []velero.RestoreItemAction, helper discovery.Helper)
 			return nil, err
 		}
 
-		resources := getResourceIncludesExcludes(helper, resourceSelector.IncludedResources, resourceSelector.ExcludedResources)
+		resources := collections.GetResourceIncludesExcludes(helper, resourceSelector.IncludedResources, resourceSelector.ExcludedResources)
 		namespaces := collections.NewIncludesExcludes().Includes(resourceSelector.IncludedNamespaces...).Excludes(resourceSelector.ExcludedNamespaces...)
 
 		selector := labels.Everything()
@@ -319,6 +323,10 @@ type restoreContext struct {
 	resourcePriorities         []string
 	hooksWaitGroup             sync.WaitGroup
 	hooksErrs                  chan error
+	resourceRestoreHooks       []hook.ResourceRestoreHook
+	waitExecHookHandler        hook.WaitExecHookHandler
+	hooksContext               go_context.Context
+	hooksCancelFunc            go_context.CancelFunc
 }
 
 type resourceClientKey struct {
@@ -435,7 +443,7 @@ func (ctx *restoreContext) execute() (Result, Result) {
 			// create a blank one.
 			if namespace != "" && !existingNamespaces.Has(targetNamespace) {
 				logger := ctx.log.WithField("namespace", namespace)
-				ns := getNamespace(logger, getItemFilePath(ctx.restoreDir, "namespaces", "", namespace), targetNamespace)
+				ns := getNamespace(logger, archive.GetItemFilePath(ctx.restoreDir, "namespaces", "", namespace), targetNamespace)
 				if _, err := kube.EnsureNamespaceExistsAndIsReady(ns, ctx.namespaceClient, ctx.resourceTerminatingTimeout); err != nil {
 					errs.AddVeleroError(err)
 					continue
@@ -487,16 +495,19 @@ func (ctx *restoreContext) execute() (Result, Result) {
 	}
 	ctx.log.Info("Done waiting for all restic restores to complete")
 
-	return warnings, errs
-}
+	// wait for all post-restore exec hooks with same logic as restic wait above
+	go func() {
+		ctx.log.Info("Waiting for all post-restore-exec hooks to complete")
 
-func getItemFilePath(rootDir, groupResource, namespace, name string) string {
-	switch namespace {
-	case "":
-		return filepath.Join(rootDir, velerov1api.ResourcesDir, groupResource, velerov1api.ClusterScopedDir, name+".json")
-	default:
-		return filepath.Join(rootDir, velerov1api.ResourcesDir, groupResource, velerov1api.NamespaceScopedDir, namespace, name+".json")
+		ctx.hooksWaitGroup.Wait()
+		close(ctx.hooksErrs)
+	}()
+	for err := range ctx.hooksErrs {
+		errs.Velero = append(errs.Velero, err.Error())
 	}
+	ctx.log.Info("Done waiting for all post-restore exec hooks to complete")
+
+	return warnings, errs
 }
 
 // getNamespace returns a namespace API object that we should attempt to
@@ -535,6 +546,7 @@ func getNamespace(logger logrus.FieldLogger, path, remappedName string) *v1.Name
 	}
 }
 
+// TODO: this should be combined with DeleteItemActions at some point.
 func (ctx *restoreContext) getApplicableActions(groupResource schema.GroupResource, namespace string) []resolvedAction {
 	var actions []resolvedAction
 	for _, action := range ctx.actions {
@@ -713,9 +725,9 @@ func (ctx *restoreContext) restoreResource(resource, targetNamespace, originalNa
 	groupResource := schema.ParseGroupResource(resource)
 
 	for _, item := range items {
-		itemPath := getItemFilePath(ctx.restoreDir, resource, originalNamespace, item)
+		itemPath := archive.GetItemFilePath(ctx.restoreDir, resource, originalNamespace, item)
 
-		obj, err := ctx.unmarshal(itemPath)
+		obj, err := archive.Unmarshal(ctx.fileSystem, itemPath)
 		if err != nil {
 			errs.Add(targetNamespace, fmt.Errorf("error decoding %q: %v", strings.Replace(itemPath, ctx.restoreDir+"/", "", -1), err))
 			continue
@@ -804,7 +816,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		// if the namespace scoped resource should be restored, ensure that the namespace into
 		// which the resource is being restored into exists.
 		// This is the *remapped* namespace that we are ensuring exists.
-		nsToEnsure := getNamespace(ctx.log, getItemFilePath(ctx.restoreDir, "namespaces", "", obj.GetNamespace()), namespace)
+		nsToEnsure := getNamespace(ctx.log, archive.GetItemFilePath(ctx.restoreDir, "namespaces", "", obj.GetNamespace()), namespace)
 		if _, err := kube.EnsureNamespaceExistsAndIsReady(nsToEnsure, ctx.namespaceClient, ctx.resourceTerminatingTimeout); err != nil {
 			errs.AddVeleroError(err)
 			return warnings, errs
@@ -896,6 +908,11 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					return warnings, errs
 				}
 				obj = updatedObj
+
+				// VolumeSnapshotter has modified the PV name, we should rename the PV
+				if oldName != obj.GetName() {
+					shouldRenamePV = true
+				}
 			}
 
 			if shouldRenamePV {
@@ -988,7 +1005,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		obj = unstructuredObj
 
 		for _, additionalItem := range executeOutput.AdditionalItems {
-			itemPath := getItemFilePath(ctx.restoreDir, additionalItem.GroupResource.String(), additionalItem.Namespace, additionalItem.Name)
+			itemPath := archive.GetItemFilePath(ctx.restoreDir, additionalItem.GroupResource.String(), additionalItem.Namespace, additionalItem.Name)
 
 			if _, err := ctx.fileSystem.Stat(itemPath); err != nil {
 				ctx.log.WithError(err).WithFields(logrus.Fields{
@@ -1002,7 +1019,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			}
 
 			additionalResourceID := getResourceID(additionalItem.GroupResource, additionalItem.Namespace, additionalItem.Name)
-			additionalObj, err := ctx.unmarshal(itemPath)
+			additionalObj, err := archive.Unmarshal(ctx.fileSystem, itemPath)
 			if err != nil {
 				errs.Add(namespace, errors.Wrapf(err, "error restoring additional item %s", additionalResourceID))
 			}
@@ -1141,6 +1158,10 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		restorePodVolumeBackups(ctx, createdObj, originalNamespace)
 	}
 
+	if groupResource == kuberesource.Pods {
+		ctx.waitExec(createdObj)
+	}
+
 	// Wait for a CRD to be available for instantiating resources
 	// before continuing.
 	if groupResource == kuberesource.CustomResourceDefinitions {
@@ -1228,6 +1249,43 @@ func restorePodVolumeBackups(ctx *restoreContext, createdObj *unstructured.Unstr
 			}
 		}()
 	}
+}
+
+// waitExec executes hooks in a restored pod's containers when they become ready
+func (ctx *restoreContext) waitExec(createdObj *unstructured.Unstructured) {
+	ctx.hooksWaitGroup.Add(1)
+	go func() {
+		// Done() will only be called after all errors have been successfully sent
+		// on the ctx.resticErrs channel
+		defer ctx.hooksWaitGroup.Done()
+
+		pod := new(v1.Pod)
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(createdObj.UnstructuredContent(), &pod); err != nil {
+			ctx.log.WithError(err).Error("error converting unstructured pod")
+			ctx.hooksErrs <- err
+			return
+		}
+		execHooksByContainer, err := hook.GroupRestoreExecHooks(
+			ctx.resourceRestoreHooks,
+			pod,
+			ctx.log,
+		)
+		if err != nil {
+			ctx.log.WithError(err).Errorf("error getting exec hooks for pod %s/%s", pod.Namespace, pod.Name)
+			ctx.hooksErrs <- err
+			return
+		}
+
+		if errs := ctx.waitExecHookHandler.HandleHooks(ctx.hooksContext, ctx.log, pod, execHooksByContainer); len(errs) > 0 {
+			ctx.log.WithError(kubeerrs.NewAggregate(errs)).Error("unable to successfully execute post-restore hooks")
+			ctx.hooksCancelFunc()
+
+			for _, err := range errs {
+				// Errors are already logged in the HandleHooks method
+				ctx.hooksErrs <- err
+			}
+		}
+	}()
 }
 
 func hasSnapshot(pvName string, snapshots []*volume.Snapshot) bool {
@@ -1334,22 +1392,4 @@ func isCompleted(obj *unstructured.Unstructured, groupResource schema.GroupResou
 	}
 	// Assume any other resource isn't complete and can be restored
 	return false, nil
-}
-
-// unmarshal reads the specified file, unmarshals the JSON contained within it
-// and returns an Unstructured object.
-func (ctx *restoreContext) unmarshal(filePath string) (*unstructured.Unstructured, error) {
-	var obj unstructured.Unstructured
-
-	bytes, err := ctx.fileSystem.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	err = json.Unmarshal(bytes, &obj)
-	if err != nil {
-		return nil, err
-	}
-
-	return &obj, nil
 }

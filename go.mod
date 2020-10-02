@@ -21,22 +21,25 @@ require (
 	github.com/kubernetes-csi/external-snapshotter/v2 v2.2.0-rc1
 	github.com/onsi/ginkgo v1.13.0
 	github.com/onsi/gomega v1.10.1
-	github.com/pkg/errors v0.8.1
-	github.com/prometheus/client_golang v1.0.0
+	github.com/pkg/errors v0.9.1
+	github.com/prometheus/client_golang v1.5.1
 	github.com/robfig/cron v1.1.0
 	github.com/sirupsen/logrus v1.4.2
 	github.com/spf13/afero v1.2.2
-	github.com/spf13/cobra v0.0.5
+	github.com/spf13/cobra v0.0.7
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.4.0
 	golang.org/x/net v0.0.0-20200520004742-59133d7f0dd7
-	google.golang.org/grpc v1.28.0
+	google.golang.org/genproto v0.0.0-20200731012542-8145dea6a485 // indirect
+	google.golang.org/grpc v1.31.0
+	google.golang.org/protobuf v1.25.0 // indirect
 	k8s.io/api v0.18.4
 	k8s.io/apiextensions-apiserver v0.18.4
 	k8s.io/apimachinery v0.18.4
 	k8s.io/cli-runtime v0.18.4
 	k8s.io/client-go v0.18.4
 	k8s.io/klog v1.0.0
+	sigs.k8s.io/cluster-api v0.3.8
 	sigs.k8s.io/controller-runtime v0.6.1
 )
 

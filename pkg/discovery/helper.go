@@ -45,6 +45,10 @@ type Helper interface {
 	// APIResource for the provided partially-specified GroupVersionResource.
 	ResourceFor(input schema.GroupVersionResource) (schema.GroupVersionResource, metav1.APIResource, error)
 
+	// KindFor gets a fully-resolved GroupVersionResource and an
+	// APIResource for the provided partially-specified GroupVersionKind.
+	KindFor(input schema.GroupVersionKind) (schema.GroupVersionResource, metav1.APIResource, error)
+
 	// Refresh pulls an updated set of Velero-backuppable resources from the
 	// discovery API.
 	Refresh() error
@@ -75,6 +79,7 @@ type helper struct {
 	mapper        meta.RESTMapper
 	resources     []*metav1.APIResourceList
 	resourcesMap  map[schema.GroupVersionResource]metav1.APIResource
+	kindMap       map[schema.GroupVersionKind]metav1.APIResource
 	apiGroups     []metav1.APIGroup
 	serverVersion *version.Info
 }
@@ -109,6 +114,31 @@ func (h *helper) ResourceFor(input schema.GroupVersionResource) (schema.GroupVer
 	return gvr, apiResource, nil
 }
 
+func (h *helper) KindFor(input schema.GroupVersionKind) (schema.GroupVersionResource, metav1.APIResource, error) {
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+
+	if resource, ok := h.kindMap[input]; ok {
+		return schema.GroupVersionResource{
+			Group:    resource.Group,
+			Version:  resource.Version,
+			Resource: resource.Name,
+		}, resource, nil
+	}
+	m, err := h.mapper.RESTMapping(schema.GroupKind{Group: input.Group, Kind: input.Kind}, input.Version)
+	if err != nil {
+		return schema.GroupVersionResource{}, metav1.APIResource{}, err
+	}
+	if resource, ok := h.kindMap[m.GroupVersionKind]; ok {
+		return schema.GroupVersionResource{
+			Group:    resource.Group,
+			Version:  resource.Version,
+			Resource: resource.Name,
+		}, resource, nil
+	}
+	return schema.GroupVersionResource{}, metav1.APIResource{}, errors.Errorf("APIResource not found for GroupVersionKind %v ", input)
+}
+
 func (h *helper) Refresh() error {
 	h.lock.Lock()
 	defer h.lock.Unlock()
@@ -126,7 +156,7 @@ func (h *helper) Refresh() error {
 		if err != nil {
 			return errors.WithStack(err)
 		}
-		h.logger.Info("The '%s' feature flag was specified, using all API group versions.", velerov1api.APIGroupVersionsFeatureFlag)
+		h.logger.Infof("The '%s' feature flag was specified, using all API group versions.", velerov1api.APIGroupVersionsFeatureFlag)
 		serverResources = serverAllResources
 	} else {
 		// ServerPreferredResources() returns only preferred APIGroup - this is the default since no feature flag has been passed
@@ -151,6 +181,7 @@ func (h *helper) Refresh() error {
 	h.mapper = shortcutExpander
 
 	h.resourcesMap = make(map[schema.GroupVersionResource]metav1.APIResource)
+	h.kindMap = make(map[schema.GroupVersionKind]metav1.APIResource)
 	for _, resourceGroup := range h.resources {
 		gv, err := schema.ParseGroupVersion(resourceGroup.GroupVersion)
 		if err != nil {
@@ -159,7 +190,9 @@ func (h *helper) Refresh() error {
 
 		for _, resource := range resourceGroup.APIResources {
 			gvr := gv.WithResource(resource.Name)
+			gvk := gv.WithKind(resource.Kind)
 			h.resourcesMap[gvr] = resource
+			h.kindMap[gvk] = resource
 		}
 	}
 

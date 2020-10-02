@@ -1,5 +1,5 @@
 /*
-Copyright 2018 the Velero contributors.
+Copyright 2020 the Velero contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,10 @@ package backuplocation
 import (
 	"context"
 
-	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
@@ -40,14 +40,14 @@ func NewGetCommand(f client.Factory, use string) *cobra.Command {
 			err := output.ValidateFlags(c)
 			cmd.CheckError(err)
 
-			client, err := f.KubebuilderClient()
+			kbClient, err := f.KubebuilderClient()
 			cmd.CheckError(err)
 
 			locations := new(velerov1api.BackupStorageLocationList)
 			if len(args) > 0 {
 				location := &velerov1api.BackupStorageLocation{}
 				for _, name := range args {
-					err = client.Get(context.Background(), kbclient.ObjectKey{
+					err = kbClient.Get(context.Background(), kbclient.ObjectKey{
 						Namespace: f.Namespace(),
 						Name:      name,
 					}, location)
@@ -55,7 +55,7 @@ func NewGetCommand(f client.Factory, use string) *cobra.Command {
 					locations.Items = append(locations.Items, *location)
 				}
 			} else {
-				err := client.List(context.Background(), locations, &kbclient.ListOptions{
+				err := kbClient.List(context.Background(), locations, &kbclient.ListOptions{
 					Namespace: f.Namespace(),
 				})
 				cmd.CheckError(err)
@@ -66,7 +66,7 @@ func NewGetCommand(f client.Factory, use string) *cobra.Command {
 		},
 	}
 
-	c.Flags().StringVarP(&listOptions.LabelSelector, "selector", "l", listOptions.LabelSelector, "only show items matching this label selector")
+	c.Flags().StringVarP(&listOptions.LabelSelector, "selector", "l", listOptions.LabelSelector, "Only show items matching this label selector.")
 
 	output.BindFlags(c.Flags())
 

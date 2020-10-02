@@ -105,3 +105,13 @@ func (b *ContainerBuilder) PullPolicy(pullPolicy corev1api.PullPolicy) *Containe
 	b.object.ImagePullPolicy = pullPolicy
 	return b
 }
+
+func (b *ContainerBuilder) Command(command []string) *ContainerBuilder {
+	if b.object.Command == nil {
+		b.object.Command = []string{}
+	}
+
+	b.object.Command = append(b.object.Command, command...)
+
+	return b
+}

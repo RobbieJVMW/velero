@@ -22,15 +22,11 @@ ARG GIT_TREE_STATE
 ENV CGO_ENABLED=0 \
     GO111MODULE=on \
     GOPROXY=${GOPROXY} \
-    LDFLAGS="-X ${PKG}/pkg/buildinfo.Version=${VERSION}" \
-    LDFLAGS="${LDFLAGS} -X ${PKG}/pkg/buildinfo.GitSHA=${GIT_SHA}" \
-    LDFLAGS="${LDFLAGS} -X ${PKG}/pkg/buildinfo.GitTreeState=${GIT_TREE_STATE}"
+    LDFLAGS="-X ${PKG}/pkg/buildinfo.Version=${VERSION} -X ${PKG}/pkg/buildinfo.GitSHA=${GIT_SHA} -X ${PKG}/pkg/buildinfo.GitTreeState=${GIT_TREE_STATE}"
 
 WORKDIR /go/src/github.com/vmware-tanzu/velero
 
 COPY . /go/src/github.com/vmware-tanzu/velero
-
-RUN go mod download
 
 RUN apt-get update && apt-get install -y bzip2
 
@@ -57,12 +53,9 @@ FROM ubuntu:focal
 
 LABEL maintainer="Nolan Brubaker <brubakern@vmware.com>"
 
-ARG BIN
-
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /output /
 
 USER nobody:nogroup
 
-ENTRYPOINT ["/${BIN}"]
